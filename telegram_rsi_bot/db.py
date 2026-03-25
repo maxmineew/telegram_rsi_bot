@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Iterable, Sequence
 
 from telegram_rsi_bot.config import DATABASE_PATH, LEVEL_KEYS, SYMBOLS, TIMEFRAMES
+
+log = logging.getLogger(__name__)
 
 
 def _ensure_parent(path: str) -> None:
@@ -132,16 +135,19 @@ def ensure_default_subscription_if_needed(user_id: int) -> None:
     типовую подписку: BTC и ETH, таймфреймы 1h/4h/1d, уровни 30/50/70.
     После /stop подписка не подставляется, пока пользователь снова не сохранит настройки.
     """
-    if not get_user_active(user_id):
-        return
-    if load_settings_rows(user_id):
-        return
-    save_settings(
-        user_id,
-        tuple(SYMBOLS.keys()),
-        TIMEFRAMES,
-        {k: True for k in LEVEL_KEYS},
-    )
+    try:
+        if not get_user_active(user_id):
+            return
+        if load_settings_rows(user_id):
+            return
+        save_settings(
+            user_id,
+            tuple(SYMBOLS.keys()),
+            TIMEFRAMES,
+            {k: True for k in LEVEL_KEYS},
+        )
+    except sqlite3.Error:
+        log.exception("ensure_default_subscription_if_needed: ошибка SQLite")
 
 
 def save_settings(

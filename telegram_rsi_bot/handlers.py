@@ -301,6 +301,47 @@ def build_stop_confirm_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _sync_prepare_settings(context: ContextTypes.DEFAULT_TYPE, uid: int) -> tuple[dict, str, InlineKeyboardMarkup]:
+    """Черновик + текст + клавиатура панели RSI (общая для /settings и callback menu:settings)."""
+    db.ensure_default_subscription_if_needed(uid)
+    raw_draft = context.user_data.get("draft")
+    draft = (
+        _load_draft_safe(uid)
+        if not raw_draft
+        else _normalize_draft(raw_draft)
+    )
+    context.user_data["draft"] = draft
+    return draft, format_settings_html(draft), build_settings_keyboard(draft)
+
+
+async def _open_rsi_settings_panel(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    uid: int,
+) -> None:
+    """Показ панели настроек по callback; при сбое — новое сообщение, без «Ошибка /start»."""
+    try:
+        _, text, kb = _sync_prepare_settings(context, uid)
+        await _safe_edit(query, text, kb)
+    except Exception:
+        log.exception("_open_rsi_settings_panel")
+        try:
+            draft = _default_draft()
+            context.user_data["draft"] = draft
+            text = format_settings_html(draft)
+            kb = build_settings_keyboard(draft)
+            if query.message:
+                await query.message.reply_text(text, reply_markup=kb, parse_mode=HTML)
+        except Exception:
+            log.exception("_open_rsi_settings_panel: fallback")
+            if query.message:
+                await query.message.reply_text(
+                    "<b>🎛 Настройки RSI</b>\n\n"
+                    "Введите <code>/settings</code> или отправьте /start.",
+                    parse_mode=HTML,
+                )
+
+
 async def _safe_edit(
     query,
     text: str,
@@ -390,14 +431,8 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     db.upsert_user(u.id, u.username)
     if not await _require_privacy(update):
         return
-    db.ensure_default_subscription_if_needed(u.id)
-    draft = _load_draft_safe(u.id)
-    context.user_data["draft"] = draft
-    await update.effective_message.reply_text(
-        format_settings_html(draft),
-        reply_markup=build_settings_keyboard(draft),
-        parse_mode=HTML,
-    )
+    _, text, kb = _sync_prepare_settings(context, u.id)
+    await update.effective_message.reply_text(text, reply_markup=kb, parse_mode=HTML)
 
 
 async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -411,12 +446,15 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             show_alert=True,
         )
         return
-    await query.answer()
     uid = u.id
     # callback_data: menu:settings → action = "settings" (не использовать split по первому ':' только)
     parts = query.data.split(":", 1)
     action = (parts[1] if len(parts) > 1 else "").strip()
     try:
+        try:
+            await query.answer()
+        except BadRequest:
+            pass
         db.upsert_user(u.id, u.username)
         if action in ("settings", "status"):
             db.ensure_default_subscription_if_needed(uid)
@@ -433,16 +471,7 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
         if action == "settings":
-            raw_draft = context.user_data.get("draft")
-            draft = (
-                _load_draft_safe(uid)
-                if not raw_draft
-                else _normalize_draft(raw_draft)
-            )
-            context.user_data["draft"] = draft
-            await _safe_edit(
-                query, format_settings_html(draft), build_settings_keyboard(draft)
-            )
+            await _open_rsi_settings_panel(query, context, uid)
             return
         if action == "status":
             status_plain = db.format_status(uid)
