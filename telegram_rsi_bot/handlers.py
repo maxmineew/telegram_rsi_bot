@@ -232,7 +232,7 @@ def build_settings_keyboard(draft: dict) -> InlineKeyboardMarkup:
     ]
     row_tf = [
         InlineKeyboardButton(
-            f"{_pill(tf in t, '✅', '▫️')} 1h",
+            f"{_pill('1h' in t, '✅', '▫️')} 1h",
             callback_data="cfg:t:1h",
         ),
         InlineKeyboardButton(
