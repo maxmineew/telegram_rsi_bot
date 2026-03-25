@@ -3,16 +3,17 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import sqlite3
 from html import escape
-from datetime import datetime, timezone
+from datetime import datetime
 
 import ccxt
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
-from telegram_rsi_bot import db
+from telegram_rsi_bot import config, db
 from telegram_rsi_bot.errors_ru import explain_exception
 from telegram_rsi_bot.monitor import SIGNAL_LABELS, _symbol_display, _tf_ru
 from telegram_rsi_bot.rsi_chart import render_rsi_chart_png
@@ -62,6 +63,50 @@ PRIVACY_TEXT = (
     "По вопросам данных обратитесь к владельцу развёртывания бота."
 )
 
+PRIVACY_GATE_INTRO = (
+    "<b>Перед началом работы</b>\n\n"
+    "Ознакомьтесь с политикой конфиденциальности ниже. "
+    "Чтобы пользоваться ботом, нажмите <b>«Принять политику конфиденциальности»</b>.\n\n"
+)
+
+PRIVACY_GATE_FULL = PRIVACY_GATE_INTRO + PRIVACY_TEXT
+
+PRIVACY_BLOCKED = (
+    "<b>Доступ ограничен</b>\n\n"
+    "Бот недоступен, пока вы не примете политику конфиденциальности. "
+    "Отправьте команду /start и нажмите кнопку принятия."
+)
+
+
+def build_privacy_accept_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Принять политику конфиденциальности",
+                    callback_data="privacy:accept",
+                ),
+            ],
+        ]
+    )
+
+
+async def _send_privacy_blocked(update: Update) -> None:
+    msg = update.effective_message
+    if msg:
+        await msg.reply_text(PRIVACY_BLOCKED, parse_mode=HTML)
+
+
+async def _require_privacy(update: Update) -> bool:
+    """False — пользователь не принял политику; отправлено пояснение."""
+    u = update.effective_user
+    if not u:
+        return False
+    if db.has_accepted_privacy(u.id):
+        return True
+    await _send_privacy_blocked(update)
+    return False
+
 
 def _default_draft() -> dict:
     return {
@@ -81,6 +126,15 @@ def _load_draft_from_db(user_id: int) -> dict:
         "timeframes": set(st["timeframes"]),
         "levels": {k: bool(st["levels"].get(k)) for k in ("30", "50", "70")},
     }
+
+
+def _load_draft_safe(user_id: int) -> dict:
+    """Загрузка настроек из БД; при сбое SQLite — пустой черновик (чтобы меню не падало)."""
+    try:
+        return _load_draft_from_db(user_id)
+    except sqlite3.Error:
+        log.exception("SQLite: не удалось загрузить настройки user_id=%s", user_id)
+        return _default_draft()
 
 
 def _normalize_draft(draft: object) -> dict:
@@ -108,14 +162,22 @@ def _normalize_draft(draft: object) -> dict:
     return out
 
 
+def _draft_for_ui(draft: object) -> dict:
+    """Гарантирует set/dict для текста и клавиатуры настроек."""
+    if not draft:
+        return _default_draft()
+    return _normalize_draft(draft)
+
+
 def _pill(on: bool, on_label: str, off_label: str) -> str:
     return on_label if on else off_label
 
 
 def format_settings_html(draft: dict) -> str:
-    s = draft["symbols"]
-    t = draft["timeframes"]
-    lv = draft["levels"]
+    d = _draft_for_ui(draft)
+    s = d["symbols"]
+    t = d["timeframes"]
+    lv = d["levels"]
     lines = [
         "<b>🎛 Панель настроек RSI</b>",
         "",
@@ -154,9 +216,10 @@ def build_main_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_settings_keyboard(draft: dict) -> InlineKeyboardMarkup:
-    s = draft["symbols"]
-    t = draft["timeframes"]
-    lv = draft["levels"]
+    d = _draft_for_ui(draft)
+    s = d["symbols"]
+    t = d["timeframes"]
+    lv = d["levels"]
     row_pairs = [
         InlineKeyboardButton(
             f"{_pill('BTCUSDT' in s, '🟢', '⚪')}  BTC",
@@ -187,7 +250,7 @@ def build_settings_keyboard(draft: dict) -> InlineKeyboardMarkup:
             callback_data="cfg:l:30",
         ),
         InlineKeyboardButton(
-            f"{_pill(lv.get('50', False), '〰️', '▫️')} 50",
+            f"{_pill(lv.get('50', False), '~', '▫️')} 50",
             callback_data="cfg:l:50",
         ),
         InlineKeyboardButton(
@@ -289,6 +352,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not db.has_accepted_privacy(u.id):
+        await update.effective_message.reply_text(
+            PRIVACY_GATE_FULL,
+            reply_markup=build_privacy_accept_keyboard(),
+            parse_mode=HTML,
+        )
+        return
+    db.ensure_default_subscription_if_needed(u.id)
     await update.effective_message.reply_text(
         MAIN_MENU,
         reply_markup=build_main_keyboard(),
@@ -301,6 +372,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not await _require_privacy(update):
+        return
     await update.effective_message.reply_text(
         HELP_TEXT,
         reply_markup=InlineKeyboardMarkup(
@@ -315,7 +388,10 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not u:
         return
     db.upsert_user(u.id, u.username)
-    draft = _load_draft_from_db(u.id)
+    if not await _require_privacy(update):
+        return
+    db.ensure_default_subscription_if_needed(u.id)
+    draft = _load_draft_safe(u.id)
     context.user_data["draft"] = draft
     await update.effective_message.reply_text(
         format_settings_html(draft),
@@ -337,11 +413,13 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     await query.answer()
     uid = u.id
-    db.upsert_user(u.id, u.username)
     # callback_data: menu:settings → action = "settings" (не использовать split по первому ':' только)
     parts = query.data.split(":", 1)
-    action = parts[1] if len(parts) > 1 else ""
+    action = (parts[1] if len(parts) > 1 else "").strip()
     try:
+        db.upsert_user(u.id, u.username)
+        if action in ("settings", "status"):
+            db.ensure_default_subscription_if_needed(uid)
         if action == "main":
             await _safe_edit(query, MAIN_MENU, build_main_keyboard())
             return
@@ -357,7 +435,7 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if action == "settings":
             raw_draft = context.user_data.get("draft")
             draft = (
-                _load_draft_from_db(uid)
+                _load_draft_safe(uid)
                 if not raw_draft
                 else _normalize_draft(raw_draft)
             )
@@ -388,6 +466,28 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if query.message:
             await query.message.reply_text(
                 "<b>Не удалось обновить экран.</b> Нажмите /start.",
+                parse_mode=HTML,
+            )
+    except Forbidden as e:
+        log.warning("on_menu_callback Forbidden: %s", e)
+        if query.message:
+            await query.message.reply_text(
+                "<b>Нет доступа к сообщению.</b> Отправьте /start новым сообщением.",
+                parse_mode=HTML,
+            )
+    except sqlite3.Error:
+        log.exception("on_menu_callback: SQLite")
+        if query.message:
+            await query.message.reply_text(
+                "<b>Ошибка базы данных.</b> Проверьте права на файл БД и путь DATABASE_PATH в .env, "
+                "затем /start.",
+                parse_mode=HTML,
+            )
+    except TelegramError as e:
+        log.warning("on_menu_callback TelegramError: %s", e)
+        if query.message:
+            await query.message.reply_text(
+                "<b>Сбой Telegram.</b> Повторите через минуту или /start.",
                 parse_mode=HTML,
             )
     except Exception:
@@ -460,9 +560,10 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         pass
     uid = u.id
     db.upsert_user(u.id, u.username)
+    db.ensure_default_subscription_if_needed(uid)
     raw_draft = context.user_data.get("draft")
     draft = (
-        _load_draft_from_db(uid)
+        _load_draft_safe(uid)
         if not raw_draft
         else _normalize_draft(raw_draft)
     )
@@ -513,12 +614,48 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await _safe_edit(query, format_settings_html(draft), build_settings_keyboard(draft))
 
 
+async def on_privacy_accept_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    u = update.effective_user
+    if not u:
+        return
+    if query.data != "privacy:accept":
+        return
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
+    db.upsert_user(u.id, u.username)
+    db.accept_privacy(u.id)
+    db.ensure_default_subscription_if_needed(u.id)
+    await _safe_edit(query, MAIN_MENU, build_main_keyboard())
+
+
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Один обработчик на все callback_data — надёжнее, чем несколько Regex в разных версиях PTB."""
     query = update.callback_query
     if not query or not query.data:
         return
     data = query.data
+    if data.startswith("privacy:"):
+        await on_privacy_accept_callback(update, context)
+        return
+    u = update.effective_user
+    if not u:
+        return
+    if not db.has_accepted_privacy(u.id):
+        try:
+            await query.answer(
+                "Сначала примите политику конфиденциальности через /start.",
+                show_alert=True,
+            )
+        except BadRequest:
+            pass
+        return
     if data.startswith("menu:"):
         await on_menu_callback(update, context)
     elif data.startswith("cfg:"):
@@ -534,6 +671,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not await _require_privacy(update):
+        return
+    db.ensure_default_subscription_if_needed(u.id)
     await update.effective_message.reply_text(
         f"<b>📊 Статус подписки</b>\n\n{escape(db.format_status(u.id))}",
         reply_markup=InlineKeyboardMarkup(
@@ -552,6 +692,9 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     u = update.effective_user
     if not u:
         return
+    db.upsert_user(u.id, u.username)
+    if not await _require_privacy(update):
+        return
     db.deactivate_user(u.id)
     context.user_data.pop("draft", None)
     await update.effective_message.reply_text(
@@ -568,9 +711,9 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def _fmt_utc_ms(ms: int) -> str:
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M UTC")
+def _fmt_ms_display(ms: int) -> str:
+    dt = datetime.fromtimestamp(ms / 1000, tz=config.display_timezone())
+    return dt.strftime("%Y-%m-%d %H:%M МСК")
 
 
 def _describe_crossovers(codes: list[str]) -> str:
@@ -624,6 +767,8 @@ async def cmd_rsi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not await _require_privacy(update):
+        return
     snap, sym, tf = await _fetch_snapshot(update, context)
     if snap is None:
         return
@@ -633,7 +778,7 @@ async def cmd_rsi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<b>📈 RSI — текущая свеча</b> (бар формируется)\n\n"
         f"Пара: <b>{pair}</b>, ТФ: <b>{_tf_ru(tf)}</b>\n"
         f"RSI(14): <b>{rc:.2f}</b>\n"
-        f"Открытие бара (UTC): {_fmt_utc_ms(snap['time_open_current_ms'])}\n\n"
+        f"Открытие бара (МСК): {_fmt_ms_display(snap['time_open_current_ms'])}\n\n"
         f"<i>Пара/ТФ — первая строка в /settings; если настроек нет — BTC 1h.</i>"
     )
     await update.effective_message.reply_text(txt, parse_mode=HTML)
@@ -644,6 +789,8 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not await _require_privacy(update):
+        return
     snap, sym, tf = await _fetch_snapshot(update, context)
     if snap is None:
         return
@@ -665,7 +812,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Пара: <b>{pair}</b>, ТФ: <b>{_tf_ru(tf)}</b>\n"
         f"{extra}"
         f"RSI(14) на закрытии последней свечи: <b>{rlc:.2f}</b>\n"
-        f"Время открытия этой свечи (UTC): {_fmt_utc_ms(snap['time_open_last_closed_ms'])}\n\n"
+        f"Время открытия этой свечи (МСК): {_fmt_ms_display(snap['time_open_last_closed_ms'])}\n\n"
         f"{_describe_crossovers(codes)}"
     )
     await update.effective_message.reply_text(txt, parse_mode=HTML)
@@ -676,6 +823,8 @@ async def cmd_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not await _require_privacy(update):
+        return
     snap, sym, tf = await _fetch_snapshot(update, context)
     if snap is None:
         return
@@ -711,6 +860,13 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not u:
         return
     db.upsert_user(u.id, u.username)
+    if not db.has_accepted_privacy(u.id):
+        await update.effective_message.reply_text(
+            PRIVACY_GATE_FULL,
+            reply_markup=build_privacy_accept_keyboard(),
+            parse_mode=HTML,
+        )
+        return
     await update.effective_message.reply_text(
         PRIVACY_TEXT,
         reply_markup=InlineKeyboardMarkup(

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -44,6 +45,13 @@ TELEGRAM_PROXY_URL = os.environ.get("TELEGRAM_PROXY_URL", "").strip()
 # Секунды для httpx к api.telegram.org (при медленном интернете или блокировках).
 TELEGRAM_CONNECT_TIMEOUT = float(os.environ.get("TELEGRAM_CONNECT_TIMEOUT", "60"))
 TELEGRAM_READ_TIMEOUT = float(os.environ.get("TELEGRAM_READ_TIMEOUT", "60"))
+# Часовой пояс для подписей времени в сообщениях и графиках (по умолчанию Москва, UTC+3).
+DISPLAY_TIMEZONE = os.environ.get("DISPLAY_TIMEZONE", "Europe/Moscow").strip()
+
+
+def display_timezone() -> ZoneInfo:
+    return ZoneInfo(DISPLAY_TIMEZONE)
+
 
 SYMBOLS = {
     "BTCUSDT": "BTC/USDT",

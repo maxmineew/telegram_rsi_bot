@@ -68,7 +68,7 @@ async def post_init(application: Application) -> None:
             err_detail,
         )
 
-    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler = AsyncIOScheduler(timezone=config.DISPLAY_TIMEZONE)
     scheduler.add_job(
         _monitor_job,
         "interval",

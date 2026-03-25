@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
+from datetime import datetime
 
 import matplotlib
 
@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from telegram_rsi_bot.config import SYMBOLS
+from telegram_rsi_bot.config import SYMBOLS, display_timezone
 
 
 def _tf_title(tf: str) -> str:
@@ -31,8 +31,9 @@ def render_rsi_chart_png(
     r = rsi[-n:]
     xs = list(range(n))
     labels = []
+    tz = display_timezone()
     for ms in t:
-        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        dt = datetime.fromtimestamp(ms / 1000, tz=tz)
         labels.append(dt.strftime("%d.%m %H:%M"))
 
     pair = SYMBOLS.get(symbol, symbol)

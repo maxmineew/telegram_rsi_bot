@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Iterable, Sequence
 
-from telegram_rsi_bot.config import DATABASE_PATH
+from telegram_rsi_bot.config import DATABASE_PATH, LEVEL_KEYS, SYMBOLS, TIMEFRAMES
 
 
 def _ensure_parent(path: str) -> None:
@@ -31,7 +31,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1
+                is_active INTEGER NOT NULL DEFAULT 1,
+                privacy_accepted INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS user_settings (
@@ -59,17 +60,45 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_user_settings_sym_tf ON user_settings(symbol, timeframe);
             """
         )
+        _migrate_users_privacy(conn)
+
+
+def _migrate_users_privacy(conn: sqlite3.Connection) -> None:
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "privacy_accepted" not in cols:
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN privacy_accepted INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def upsert_user(user_id: int, username: str | None) -> None:
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO users (user_id, username, is_active)
-            VALUES (?, ?, 1)
+            INSERT INTO users (user_id, username, is_active, privacy_accepted)
+            VALUES (?, ?, 1, 0)
             ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
             """,
             (user_id, username or ""),
+        )
+
+
+def has_accepted_privacy(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT privacy_accepted FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    if row is None:
+        return False
+    return bool(row["privacy_accepted"])
+
+
+def accept_privacy(user_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE users SET privacy_accepted = 1 WHERE user_id = ?",
+            (user_id,),
         )
 
 
@@ -95,6 +124,24 @@ def get_user_active(user_id: int) -> bool:
         if row is None:
             return False
         return bool(row["is_active"])
+
+
+def ensure_default_subscription_if_needed(user_id: int) -> None:
+    """
+    Активный пользователь без сохранённых строк в user_settings получает
+    типовую подписку: BTC и ETH, таймфреймы 1h/4h/1d, уровни 30/50/70.
+    После /stop подписка не подставляется, пока пользователь снова не сохранит настройки.
+    """
+    if not get_user_active(user_id):
+        return
+    if load_settings_rows(user_id):
+        return
+    save_settings(
+        user_id,
+        tuple(SYMBOLS.keys()),
+        TIMEFRAMES,
+        {k: True for k in LEVEL_KEYS},
+    )
 
 
 def save_settings(
@@ -202,7 +249,7 @@ def distinct_symbol_timeframes() -> list[tuple[str, str]]:
             SELECT DISTINCT us.symbol, us.timeframe
             FROM user_settings us
             JOIN users u ON u.user_id = us.user_id
-            WHERE u.is_active = 1
+            WHERE u.is_active = 1 AND u.privacy_accepted = 1
             """
         ).fetchall()
     return [(r["symbol"], r["timeframe"]) for r in rows]
@@ -224,7 +271,7 @@ def user_ids_for_signal(
             SELECT DISTINCT us.user_id
             FROM user_settings us
             JOIN users u ON u.user_id = us.user_id
-            WHERE u.is_active = 1
+            WHERE u.is_active = 1 AND u.privacy_accepted = 1
               AND us.symbol = ?
               AND us.timeframe = ?
               AND us.{level_col} = 1

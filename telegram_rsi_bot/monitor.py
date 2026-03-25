@@ -8,7 +8,7 @@ from telegram import Bot
 from telegram.error import Forbidden, TelegramError
 
 from telegram_rsi_bot import db
-from telegram_rsi_bot.config import OHLCV_LIMIT, SYMBOLS
+from telegram_rsi_bot.config import OHLCV_LIMIT, SYMBOLS, display_timezone
 from telegram_rsi_bot.errors_ru import explain_exception
 from telegram_rsi_bot.exchange import fetch_closes
 from telegram_rsi_bot.rsi_util import compute_rsi, detect_signals
@@ -35,10 +35,10 @@ def format_signal_message(
     symbol: str, timeframe: str, signal_code: str, rsi_value: float, bar_time_ms: int
 ) -> str:
     action, _ = SIGNAL_LABELS[signal_code]
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    dt = datetime.fromtimestamp(bar_time_ms / 1000, tz=timezone.utc)
-    t_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+    dt = datetime.fromtimestamp(bar_time_ms / 1000, tz=display_timezone())
+    t_str = dt.strftime("%Y-%m-%d %H:%M МСК")
     pair = _symbol_display(symbol)
     return (
         f"🚨 *Сигнал RSI*\n"
