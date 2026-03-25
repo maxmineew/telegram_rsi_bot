@@ -1,0 +1,37 @@
+Развёртывание бота на VPS Beget (beget.com)
+==========================================
+
+1) На сервере (SSH) установите Python 3.10+ и git, склонируйте проект в каталог, например:
+   /home/ВАШ_ПОЛЬЗОВАТЕЛЬ/kindsem-rsi-bot
+
+2) Виртуальное окружение и зависимости:
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -U pip
+   pip install -r requirements.txt
+
+3) Файл .env в корне проекта (рядом с requirements.txt):
+   BOT_TOKEN=...          токен от @BotFather
+   EXCHANGE_ID=okx
+   DATABASE_PATH=/home/ВАШ_ПОЛЬЗОВАТЕЛЬ/kindsem-rsi-bot/data/bot.sqlite3
+   MONITOR_INTERVAL_SEC=60
+   EXCHANGE_TIMEOUT_MS=45000
+   При нестабильном канале к бирже можно увеличить EXCHANGE_TIMEOUT_MS до 60000.
+
+4) Если api.telegram.org недоступен с VPS, укажите прокси (редко для Beget):
+   TELEGRAM_PROXY_URL=http://user:pass@host:port
+   либо стандартные переменные окружения HTTP_PROXY / HTTPS_PROXY в том же .env
+
+5) systemd: скопируйте deploy/beget.service в /etc/systemd/system/telegram-rsi-bot.service,
+   замените YOUR_USER и пути на свои, затем:
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now telegram-rsi-bot
+
+6) Просмотр логов:
+   journalctl -u telegram-rsi-bot -f
+
+Типичные ошибки
+---------------
+- Conflict / «запущено несколько экземпляров»: остановите второй процесс (второй systemd или ручной запуск).
+- Таймаут к бирже: увеличьте EXCHANGE_TIMEOUT_MS, проверьте firewall и DNS сервера.
+- Нет связи с Telegram: проверьте исходящий HTTPS к api.telegram.org; при блокировке — прокси.

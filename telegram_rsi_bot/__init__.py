@@ -1,0 +1,1 @@
+"""Telegram RSI signal bot."""

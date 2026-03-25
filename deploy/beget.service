@@ -1,0 +1,25 @@
+# Пример unit-файла systemd для VPS Beget (или любой Linux с systemd).
+# Скопируйте на сервер, поправьте пути и пользователя, затем:
+#   sudo cp beget.service /etc/systemd/system/telegram-rsi-bot.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now telegram-rsi-bot
+#
+# Логи: journalctl -u telegram-rsi-bot -f
+
+[Unit]
+Description=Telegram RSI Monitor Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Пользователь, от имени которого лежит проект (замените на своего, не root):
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/kindsem-rsi-bot
+EnvironmentFile=/home/YOUR_USER/kindsem-rsi-bot/.env
+ExecStart=/home/YOUR_USER/kindsem-rsi-bot/.venv/bin/python -m telegram_rsi_bot
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
